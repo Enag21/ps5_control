@@ -63,3 +63,10 @@ def DeadZone(dead_zone, value):
         return 0.0, True
     else:
         return value, False
+    
+def apply_deadzone(x, y, deadzone):
+    if -deadzone <= x <= deadzone:
+        x = 0
+    if -deadzone <= y <= deadzone:
+        y = 0
+    return x, y

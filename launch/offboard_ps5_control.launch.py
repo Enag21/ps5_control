@@ -30,15 +30,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # ROS2 node to launch GPU LiDAR bridge
-    gpu_lidar_bridge = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=['lidar@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
-                   '/lidar/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked'],
-        output='screen'
-    )
-
     # ROS2 node for drone control
     drone_control_node = Node(
         package = 'ps5_control',
@@ -51,6 +42,5 @@ def generate_launch_description():
         start_microxrceagent,
         start_px4_simulation,
         source_ros_workspace,
-        drone_control_node,
-        gpu_lidar_bridge
+        drone_control_node
     ])

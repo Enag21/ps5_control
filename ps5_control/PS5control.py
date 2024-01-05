@@ -2,9 +2,11 @@ import rclpy
 import numpy as np
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from px4_msgs.msg import VehicleCommand, OffboardControlMode, TrajectorySetpoint, VehicleLocalPosition, VehicleStatus
+from px4_msgs.msg import VehicleCommand, OffboardControlMode, TrajectorySetpoint, VehicleLocalPosition, VehicleStatus, VehicleAttitude
 from pydualsense import pydualsense, TriggerModes
-from ps5_control.scripts.helpers import Vector2D, DeadZone
+from ps5_control.scripts.helpers import Vector2D, DeadZone, apply_deadzone
+import quaternion
+import math
 
 class OffboardControlWithPS5(Node):
     def __init__(self) -> None:
@@ -16,6 +18,8 @@ class OffboardControlWithPS5(Node):
         self.ds.light.setColorI(0,0,255)
         self.dead_zone = 10
         self.joystick_input : bool = False
+        self.ignore_atittude_commands : bool = False
+        self.speed_multiplier : float = 1.0
 
         if self.ds.device is None:
             self.get_logger().warn("No DualSense controller found!")
@@ -23,6 +27,7 @@ class OffboardControlWithPS5(Node):
 
         self.ds.circle_pressed += self.circle_down
         self.ds.square_pressed += self.square_down
+        self.ds.l1_changed += self.l1_down
         self.ds.triggerL.setMode(TriggerModes.Rigid)
         self.ds.triggerR.setMode(TriggerModes.Rigid)
 
@@ -31,7 +36,7 @@ class OffboardControlWithPS5(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=1
         )
 
         # Create publichers
@@ -47,7 +52,9 @@ class OffboardControlWithPS5(Node):
             VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.vehicle_local_position_callback, qos_profile)
         self.vehicle_status_subscriber = self.create_subscription(
             VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_profile)
-
+        self.vehicle_attitude_subscriber = self.create_subscription(
+            VehicleAttitude, '/fmu/vehicle_attitude/out', self.vehicle_attitude_callback, qos_profile)
+        
         # Initialize variables
         self.vehicle_local_position = VehicleLocalPosition()
         self.vehicle_status = VehicleStatus()
@@ -56,17 +63,32 @@ class OffboardControlWithPS5(Node):
         self.delta_L = 0.0
         self.delta_R = 0.0
         self.direction_vector = Vector2D(0.0, 0.0)
+        self.current_yaw = 0.0
 
         # Create a timer to publish control commands
         self.create_timer(0.01, self.control_callback)
+
 
     def vehicle_local_position_callback(self, vehicle_local_position):
         """Callback function for vehicle_local_position topic subscriber."""
         self.vehicle_local_position = vehicle_local_position
 
+
     def vehicle_status_callback(self, vehicle_status):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
+
+
+    def vehicle_attitude_callback(self, vehicle_attitude):
+        q = quaternion.from_float_array(
+            vehicle_attitude.q[0],
+            vehicle_attitude.q[1],
+            vehicle_attitude.q[2],
+            vehicle_attitude.q[3]
+        )
+        euler = quaternion.as_euler_angles(q)
+        yaw = euler[2]  # Extract yaw component (assuming roll, pitch, yaw)
+        self.current_yaw = yaw
 
     def arm(self):
         """Send an arm command to the vehicle."""
@@ -75,6 +97,7 @@ class OffboardControlWithPS5(Node):
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
         self.get_logger().info('Arm command sent')
 
+
     def disarm(self):
         """Send a disarm command to the vehicle."""
         self.ds.light.setColorI(0,0,255)
@@ -82,17 +105,20 @@ class OffboardControlWithPS5(Node):
             VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
         self.get_logger().info('Disarm command sent')
 
+
     def engage_offboard_mode(self):
         """Switch to offboard mode."""
         self.publish_vehicle_command(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
         self.get_logger().info("Switching to offboard mode")
 
+
     def land(self):
         """Switch to land mode."""
         self.ds.light.setColorI(255,0,0)
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
         self.get_logger().info("Switching to land mode")
+
 
     def publish_offboard_control_heartbeat_signal(self):
         """Publish the offboard control mode."""
@@ -105,14 +131,16 @@ class OffboardControlWithPS5(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_control_mode_publisher.publish(msg)
 
-    def publish_position_setpoint(self, x: float, y: float, z: float):
+
+    def publish_position_setpoint(self, x: float, y: float, z: float, yaw : float):
         """Publish the trajectory setpoint."""
         msg = TrajectorySetpoint()
         msg.position = [x, y, z]
-        msg.yaw = 1.57079  # (90 degree)
+        msg.yaw = 180.0 # (90 degree)
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher.publish(msg)
         self.get_logger().info(f"Publishing position setpoints {[x, y, z]}")
+
 
     def publish_vehicle_command(self, command, **params) -> None:
         """Publish a vehicle command."""
@@ -133,6 +161,7 @@ class OffboardControlWithPS5(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
 
+
     def circle_down(self, state):
         if state:
             if self.is_armed:
@@ -143,42 +172,55 @@ class OffboardControlWithPS5(Node):
                 self.arm()
                 self.is_armed = True
 
+
     def square_down(self, state):
         if state:
             self.land()
 
+
+    def l1_down(self, state):
+        if state:
+            self.ignore_atittude_commands = not self.ignore_atittude_commands
+    
+
     def control_callback(self):
         self.publish_offboard_control_heartbeat_signal()
-        # Store altitude commands
-        triggerL_value = self.ds.state.L2 / 255
-        triggerR_value = self.ds.state.R2 / 255
 
-        self.delta_L = triggerL_value
-        self.delta_R = triggerR_value
+        # Manage XY movement (Left joystick)
+        raw_x = self.ds.state.LY * -1 # range is -127 to 128 Y in joystick corresponds to forward for the drone (X)
+        raw_y = self.ds.state.LX * -1 # range is -127 to 128 X in joystick corresponds to Y for the drone
 
-        delta_altitude = self.delta_R - self.delta_L
+        adjusted_x, adjusted_y = apply_deadzone(raw_x, raw_y, self.dead_zone)
+        direction = Vector2D(adjusted_x, adjusted_y).normalize()
 
-        # Store direction commands in a 2D vector and normalize
-        self.direction_vector.x, self.joystick_input = DeadZone(self.dead_zone, self.ds.state.RX * -1.0)
-        self.direction_vector.y, self.joystick_input  = DeadZone(self.dead_zone, self.ds.state.RY * -1.0)
+        drone_yaw = self.vehicle_local_position.heading
 
-        direction = self.direction_vector.normalize()
+        forward_x = math.cos(drone_yaw) * direction.x - math.sin(drone_yaw) * direction.y
+        forward_y = math.sin(drone_yaw) * direction.x + math.cos(drone_yaw) * direction.y
+
+        # Manage yaw and attitude (Right joystick)
+        raw_rx = self.ds.state.RX
+        raw_ry = self.ds.state.RY
+
+        adjusted_rx, adjusted_ry = apply_deadzone(raw_rx, raw_ry, self.dead_zone)
 
 
-        if delta_altitude != 0.0 or self.joystick_input:
-            self.publish_altitude_adjustment(direction, delta_altitude)
-    
-    def publish_altitude_adjustment(self, direction: Vector2D, delta_altitude: float):
+        MAX_YAW_RATE = 5  # Maximum yaw rate, determine based on your drone's capabilities
 
-        if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-            self.publish_position_setpoint( self.vehicle_local_position.x + direction.x,
-                                            self.vehicle_local_position.y + direction.y,
-                                            self.vehicle_local_position.z + delta_altitude)
-"""         else:
-            self.get_logger().info(f"NO INPUT")
-            self.publish_position_setpoint( self.vehicle_local_position.x,
-                                            self.vehicle_local_position.y,
-                                            self.vehicle_local_position.z + delta_altitude) """
+        # Scale adjusted_rx to the range of -MAX_YAW_RATE to MAX_YAW_RATE
+        yaw_rate = (adjusted_rx / 128.0) * MAX_YAW_RATE
+
+
+        MAX_ALTITUDE_RATE = 5  # Maximum altitude change rate
+
+        # Scale adjusted_ry to the range of -MAX_ALTITUDE_RATE to MAX_ALTITUDE_RATE
+        altitude_rate = (adjusted_ry / 128.0) * MAX_ALTITUDE_RATE
+
+
+        self.publish_position_setpoint(self.vehicle_local_position.x + forward_x,
+                                    self.vehicle_local_position.y + forward_y,
+                                    self.vehicle_local_position.z + altitude_rate,
+                                    yaw_rate * self.get_clock().now().nanoseconds / 1e9)
 
 def main(args=None):
     rclpy.init(args=args)
