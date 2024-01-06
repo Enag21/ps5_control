@@ -136,10 +136,10 @@ class OffboardControlWithPS5(Node):
         """Publish the trajectory setpoint."""
         msg = TrajectorySetpoint()
         msg.position = [x, y, z]
-        msg.yaw = 180.0 # (90 degree)
+        msg.yaw = yaw 
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher.publish(msg)
-        self.get_logger().info(f"Publishing position setpoints {[x, y, z]}")
+        self.get_logger().info(f"Publishing position setpoints {[x, y, z, yaw]}")
 
 
     def publish_vehicle_command(self, command, **params) -> None:
@@ -182,7 +182,11 @@ class OffboardControlWithPS5(Node):
         if state:
             self.ignore_atittude_commands = not self.ignore_atittude_commands
     
-
+    def normalize_angle(self, angle):
+        # Normalize an angle to the range [-pi, pi)
+        normalized_angle = (angle + math.pi) % (2 * math.pi) - math.pi
+        return normalized_angle
+    
     def control_callback(self):
         self.publish_offboard_control_heartbeat_signal()
 
@@ -205,10 +209,10 @@ class OffboardControlWithPS5(Node):
         adjusted_rx, adjusted_ry = apply_deadzone(raw_rx, raw_ry, self.dead_zone)
 
 
-        MAX_YAW_RATE = 5  # Maximum yaw rate, determine based on your drone's capabilities
+        MAX_YAW_RATE = 0.25  # Maximum yaw rate, rad/s
 
         # Scale adjusted_rx to the range of -MAX_YAW_RATE to MAX_YAW_RATE
-        yaw_rate = (adjusted_rx / 128.0) * MAX_YAW_RATE
+        yaw_rate = (adjusted_rx / 128.0) * MAX_YAW_RATE * -1
 
 
         MAX_ALTITUDE_RATE = 5  # Maximum altitude change rate
@@ -220,7 +224,7 @@ class OffboardControlWithPS5(Node):
         self.publish_position_setpoint(self.vehicle_local_position.x + forward_x,
                                     self.vehicle_local_position.y + forward_y,
                                     self.vehicle_local_position.z + altitude_rate,
-                                    yaw_rate * self.get_clock().now().nanoseconds / 1e9)
+                                    drone_yaw + yaw_rate)
 
 def main(args=None):
     rclpy.init(args=args)
