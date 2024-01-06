@@ -181,18 +181,14 @@ class OffboardControlWithPS5(Node):
     def l1_down(self, state):
         if state:
             self.ignore_atittude_commands = not self.ignore_atittude_commands
-    
-    def normalize_angle(self, angle):
-        # Normalize an angle to the range [-pi, pi)
-        normalized_angle = (angle + math.pi) % (2 * math.pi) - math.pi
-        return normalized_angle
-    
+
+
     def control_callback(self):
         self.publish_offboard_control_heartbeat_signal()
 
         # Manage XY movement (Left joystick)
         raw_x = self.ds.state.LY * -1 # range is -127 to 128 Y in joystick corresponds to forward for the drone (X)
-        raw_y = self.ds.state.LX * -1 # range is -127 to 128 X in joystick corresponds to Y for the drone
+        raw_y = self.ds.state.LX * 1 # range is -127 to 128 X in joystick corresponds to Y for the drone
 
         adjusted_x, adjusted_y = apply_deadzone(raw_x, raw_y, self.dead_zone)
         direction = Vector2D(adjusted_x, adjusted_y).normalize()
@@ -208,11 +204,8 @@ class OffboardControlWithPS5(Node):
 
         adjusted_rx, adjusted_ry = apply_deadzone(raw_rx, raw_ry, self.dead_zone)
 
-
-        MAX_YAW_RATE = 0.25  # Maximum yaw rate, rad/s
-
         # Scale adjusted_rx to the range of -MAX_YAW_RATE to MAX_YAW_RATE
-        yaw_rate = (adjusted_rx / 128.0) * MAX_YAW_RATE * -1
+        new_yaw = drone_yaw + (adjusted_rx / 128.0) * -5 
 
 
         MAX_ALTITUDE_RATE = 5  # Maximum altitude change rate
@@ -224,7 +217,7 @@ class OffboardControlWithPS5(Node):
         self.publish_position_setpoint(self.vehicle_local_position.x + forward_x,
                                     self.vehicle_local_position.y + forward_y,
                                     self.vehicle_local_position.z + altitude_rate,
-                                    drone_yaw + yaw_rate)
+                                    new_yaw)
 
 def main(args=None):
     rclpy.init(args=args)
