@@ -5,8 +5,11 @@ from ament_index_python.packages import get_package_share_directory
 import os
 
 def generate_launch_description():
-    # Define the working directories for your commands
-    px4_autopilot_dir = os.getenv('HOME') + '/Desktop/SpecialCourse/PX4-Autopilot/'
+    # Get the PX4 Autopilot directory from the environment variable
+    px4_autopilot_dir = os.getenv('PX4_AUTODIR')
+    if px4_autopilot_dir is None:
+        raise EnvironmentError("PX4_AUTODIR environment variable not set")
+
     # Command to run MicroXRCEAgent in a new tab
     start_microxrceagent = ExecuteProcess(
         cmd=['gnome-terminal', '--tab', '--', 'bash', '-c', 'MicroXRCEAgent udp4 -p 8888; bash'],
