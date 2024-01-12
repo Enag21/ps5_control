@@ -70,3 +70,14 @@ def apply_deadzone(x, y, deadzone):
     if -deadzone <= y <= deadzone:
         y = 0
     return x, y
+
+
+def distance_to_force(distance, max_force=255, max_distance = 5):
+    distance_percentage = 1 - (distance / max_distance)
+    force = max_force * (1 - np.power(distance_percentage, 4))
+    force = clamp(force, 0, 255)
+    return int(force)
+
+
+def clamp(value, min_value, max_value):
+    return max(min_value, min(value, max_value))

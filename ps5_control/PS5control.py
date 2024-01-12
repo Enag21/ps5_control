@@ -4,7 +4,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import VehicleCommand, OffboardControlMode, TrajectorySetpoint, VehicleLocalPosition, VehicleStatus, VehicleAttitude
 from pydualsense import pydualsense, TriggerModes
-from ps5_control.scripts.helpers import Vector2D, DeadZone, apply_deadzone
+from ps5_control.scripts.helpers import Vector2D, apply_deadzone, distance_to_force
 import quaternion
 import math
 
@@ -19,6 +19,7 @@ class OffboardControlWithPS5(Node):
         self.dead_zone = 10
         self.joystick_input : bool = False
         self.ignore_atittude_commands : bool = False
+        self.ignore_rotation_commands : bool = False
         self.speed_multiplier : float = 1.0
 
         if self.ds.device is None:
@@ -28,6 +29,11 @@ class OffboardControlWithPS5(Node):
         self.ds.circle_pressed += self.circle_down
         self.ds.square_pressed += self.square_down
         self.ds.l1_changed += self.l1_down
+        self.ds.r1_changed += self.r1_down
+        self.ds.dpad_up += self.dpad_up
+        self.ds.dpad_down += self.dpad_down
+        self.ds.dpad_right += self.dpad_right
+        self.ds.dpad_left += self.dpad_left
         self.ds.triggerL.setMode(TriggerModes.Rigid)
         self.ds.triggerR.setMode(TriggerModes.Rigid)
 
@@ -64,7 +70,9 @@ class OffboardControlWithPS5(Node):
         self.delta_R = 0.0
         self.direction_vector = Vector2D(0.0, 0.0)
         self.current_yaw = 0.0
-
+        self.delta_pad_x = 0.0
+        self.delta_pad_y = 0.0
+        self.poosition_delta = Vector2D(0, 0)
         # Create a timer to publish control commands
         self.create_timer(0.01, self.control_callback)
 
@@ -139,7 +147,7 @@ class OffboardControlWithPS5(Node):
         msg.yaw = yaw 
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_setpoint_publisher.publish(msg)
-        self.get_logger().info(f"Publishing position setpoints {[x, y, z, yaw]}")
+        #self.get_logger().info(f"Publishing position setpoints {[x, y, z, yaw]}")
 
 
     def publish_vehicle_command(self, command, **params) -> None:
@@ -181,11 +189,25 @@ class OffboardControlWithPS5(Node):
     def l1_down(self, state):
         if state:
             self.ignore_atittude_commands = not self.ignore_atittude_commands
+    
 
+    def r1_down(self, state):
+        if state:
+            self.ignore_rotation_commands = not self.ignore_rotation_commands
 
-    def control_callback(self):
-        self.publish_offboard_control_heartbeat_signal()
+    def dpad_up(self, state):
+        self.delta_pad_x = 0.5
+    
+    def dpad_down(self, state):
+        self.delta_pad_x = -0.5
 
+    def dpad_right(self, state):
+        self.delta_pad_y = 0.5
+
+    def dpad_left(self, state):
+        self.delta_pad_y = -0.5
+
+    def handle_XY_movement(self) -> Vector2D:
         # Manage XY movement (Left joystick)
         raw_x = self.ds.state.LY * -1 # range is -127 to 128 Y in joystick corresponds to forward for the drone (X)
         raw_y = self.ds.state.LX * 1 # range is -127 to 128 X in joystick corresponds to Y for the drone
@@ -197,27 +219,91 @@ class OffboardControlWithPS5(Node):
 
         forward_x = math.cos(drone_yaw) * direction.x - math.sin(drone_yaw) * direction.y
         forward_y = math.sin(drone_yaw) * direction.x + math.cos(drone_yaw) * direction.y
+        return Vector2D(forward_x, forward_y)
 
-        # Manage yaw and attitude (Right joystick)
+
+    def handle_yaw_rotation(self):
+        drone_yaw = self.vehicle_local_position.heading
         raw_rx = self.ds.state.RX
         raw_ry = self.ds.state.RY
 
-        adjusted_rx, adjusted_ry = apply_deadzone(raw_rx, raw_ry, self.dead_zone)
-
-        # Scale adjusted_rx to the range of -MAX_YAW_RATE to MAX_YAW_RATE
+        adjusted_rx, _ = apply_deadzone(raw_rx, raw_ry, self.dead_zone)
         new_yaw = drone_yaw + (adjusted_rx / 128.0) * -5 
 
+        if self.ignore_rotation_commands:
+            new_yaw = drone_yaw
 
+        return new_yaw
+
+
+    def hanlde_altitude(self):
         MAX_ALTITUDE_RATE = 5  # Maximum altitude change rate
+        raw_rx = self.ds.state.RX
+        raw_ry = self.ds.state.RY
 
-        # Scale adjusted_ry to the range of -MAX_ALTITUDE_RATE to MAX_ALTITUDE_RATE
+        _, adjusted_ry = apply_deadzone(raw_rx, raw_ry, self.dead_zone)
         altitude_rate = (adjusted_ry / 128.0) * MAX_ALTITUDE_RATE
+        if self.ignore_atittude_commands:
+            altitude_rate = 0.0
+        
+        return altitude_rate
 
 
-        self.publish_position_setpoint(self.vehicle_local_position.x + forward_x,
-                                    self.vehicle_local_position.y + forward_y,
+    def block_movement(self):
+        self.ds.triggerR.setForce(1, force=255)
+
+
+    def allow_movement(self):
+        self.ds.triggerR.setMode(TriggerModes.Off)
+
+
+    def handle_feedback(self):
+        obstacle_position = np.array([-5, 10])
+        drone_position = np.array([self.vehicle_local_position.x, self.vehicle_local_position.y])
+        distance = np.linalg.norm(obstacle_position - drone_position) - 0.75
+        vector_to_obstacle = obstacle_position - drone_position
+        movement_dir = self.handle_XY_movement()
+        movement_dir = np.array([movement_dir.x, movement_dir.y])
+        dot_product = np.dot(vector_to_obstacle, movement_dir)
+
+        if distance < 3.0:
+            self.ds.triggerR.setMode(TriggerModes.Rigid)
+            force = distance_to_force(distance, max_distance = 7.5)
+            self.get_logger().info(f"Close to obstacle: {force}")
+            self.ds.light.setColorI(255, 255, 0)
+            self.ds.triggerR.setForce(1, force)
+            self.ds.setLeftMotor(force)
+            self.ds.setRightMotor(force)
+            if distance < 1.0:
+                self.block_movement()
+                if dot_product > 0:
+                    self.position_delta *= 0.0
+        else:
+            self.ds.setLeftMotor(0)
+            self.ds.setRightMotor(0)
+            self.ds.light.setColorI(0, 255, 0)
+            self.allow_movement()
+
+
+    def control_callback(self):
+        self.publish_offboard_control_heartbeat_signal()
+
+        self.position_delta = self.handle_XY_movement()
+        new_yaw = self.handle_yaw_rotation()
+        altitude_rate = self.hanlde_altitude()
+        self.handle_feedback()
+
+        
+        #self.get_logger().info(f"R2: {self.delta_pad_x}")
+        if self.ds.state.R2 == 0:
+            self.position_delta *= 0.0
+
+
+        self.publish_position_setpoint(self.vehicle_local_position.x + self.position_delta.x,
+                                    self.vehicle_local_position.y + self.position_delta.y,
                                     self.vehicle_local_position.z + altitude_rate,
                                     new_yaw)
+        
 
 def main(args=None):
     rclpy.init(args=args)
