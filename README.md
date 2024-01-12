@@ -40,7 +40,7 @@ Got to the ROS2 workspace and run:
 ```
 source install/setup.bash
 ```
-
+Copy `custom.sdf`file and paste it inside `/PX4-Autopilot/Tools/simulation/gz/worlds/`.
 ## How to use:
 
 Run the ROS2 launch:
