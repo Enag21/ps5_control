@@ -32,10 +32,22 @@ cd ..
 source /opt/ros/humble/setup.bash
 colcon build
 ```
+Set an Environment Variable for the PX4 Directory in `.bashrc`:
+```
+export PX4_AUTODIR=$HOME/path/to/your/PX4-Autopilot
+```
+Got to the ROS2 workspace and run:
+```
+source install/setup.bash
+```
 
 ## How to use:
 
-*Place here launch file command*
+Run the ROS2 launch:
+
+```
+ros2 launch ps5_control offboard_ps5_control.launch.py
+```
 
 ### Controller settings:
 
